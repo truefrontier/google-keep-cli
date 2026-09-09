@@ -10,6 +10,18 @@ from playwright.async_api import async_playwright
 from rich.console import Console
 from rich.table import Table
 
+from keep_cli.agent_ux import (
+    EXIT_NOT_FOUND,
+    agent_output_options,
+    die,
+    emit_csv,
+    emit_json,
+    note_showing,
+    resolve_format,
+    select_fields,
+)
+
+
 PROFILE = Path.home() / ".keep-cli" / "chrome-profile"
 STEALTH = ["--disable-blink-features=AutomationControlled"]
 console = Console()
@@ -21,8 +33,8 @@ def has_session() -> bool:
 
 def need_session() -> None:
     if not has_session():
-        console.print("[red]No session. Run: keep login[/red]")
-        raise SystemExit(1)
+        from keep_cli.agent_ux import EXIT_AUTH, die
+        die("No session found.", EXIT_AUTH, hint="Run: keep login")
 
 
 async def open_context(playwright, headless: bool):
@@ -181,12 +193,15 @@ def login_cmd():
     asyncio.run(login())
 
 
+KEEP_COMPACT = ("id", "type", "title", "updated", "pinned", "archived")
+
+
 @main.command("list")
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@agent_output_options()
 @click.option("--limit", type=int, default=None)
 @click.option("--archived", is_flag=True, help="Include archived notes")
 @click.option("--id-only", is_flag=True)
-def list_cmd(fmt, limit, archived, id_only):
+def list_cmd(fmt, compact, select, quiet, as_csv, limit, archived, id_only):
     """List notes from a Keep sync."""
     need_session()
     notes = asyncio.run(sync_notes(include_archived=archived, limit=limit))
@@ -194,8 +209,27 @@ def list_cmd(fmt, limit, archived, id_only):
         for note in notes:
             click.echo(note["id"])
         return
+    rows = notes
+    if compact:
+        rows = [
+            {
+                "id": n["id"],
+                "type": n["type"],
+                "title": display_title(n),
+                "updated": n.get("updated") or "",
+                "pinned": n.get("pinned"),
+                "archived": n.get("archived"),
+            }
+            for n in notes
+        ]
+    rows = select_fields(rows, select)
+    fmt = resolve_format(fmt)
+    if as_csv or fmt == "csv":
+        fields = list(rows[0].keys()) if rows else list(KEEP_COMPACT)
+        emit_csv(rows if isinstance(rows, list) else [rows], fields)
+        return
     if fmt == "json":
-        click.echo(json.dumps(notes, indent=2))
+        emit_json(rows)
         return
     table = Table(title="Keep notes")
     table.add_column("ID", style="cyan", no_wrap=True)
@@ -207,16 +241,16 @@ def list_cmd(fmt, limit, archived, id_only):
         pin = "📌 " if note["pinned"] else ""
         table.add_row(note["id"], note["type"], pin + title, (note["updated"] or "")[:19])
     console.print(table)
-    console.print(f"{len(notes)} notes")
+    note_showing(len(notes), quiet=quiet, noun="notes")
 
 
 @main.command()
 @click.argument("query")
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@agent_output_options()
 @click.option("--limit", type=int, default=50)
 @click.option("--archived", is_flag=True)
 @click.option("--id-only", is_flag=True)
-def search(query, fmt, limit, archived, id_only):
+def search(query, fmt, compact, select, quiet, as_csv, limit, archived, id_only):
     """Search note titles and text."""
     need_session()
     notes = [n for n in asyncio.run(sync_notes(include_archived=archived)) if note_matches(n, query)]
@@ -225,10 +259,26 @@ def search(query, fmt, limit, archived, id_only):
         for note in notes:
             click.echo(note["id"])
         return
-    if fmt == "json":
-        click.echo(json.dumps(notes, indent=2))
+    rows = notes
+    if compact:
+        rows = [
+            {
+                "id": n["id"],
+                "title": display_title(n),
+                "updated": n.get("updated") or "",
+            }
+            for n in notes
+        ]
+    rows = select_fields(rows, select)
+    fmt = resolve_format(fmt)
+    if as_csv:
+        fields = list(rows[0].keys()) if rows else ["id", "title"]
+        emit_csv(rows if isinstance(rows, list) else [rows], fields)
         return
-    table = Table(title=f'Search: {query}')
+    if fmt == "json":
+        emit_json(rows)
+        return
+    table = Table(title=f"Search: {query}")
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Title", style="white")
     table.add_column("Snippet", style="green")
@@ -237,13 +287,13 @@ def search(query, fmt, limit, archived, id_only):
         snippet = (note["text"] or "").replace("\n", " ")[:80]
         table.add_row(note["id"], title, snippet)
     console.print(table)
-    console.print(f"{len(notes)} notes")
+    note_showing(len(notes), quiet=quiet, noun="notes")
 
 
 @main.command()
 @click.argument("note_id")
-@click.option("--format", "fmt", type=click.Choice(["table", "json", "text"]), default="table")
-def info(note_id, fmt):
+@agent_output_options(formats=("table", "json", "text"))
+def info(note_id, fmt, compact, select, quiet, as_csv):
     """Show one note by id."""
     need_session()
     notes = asyncio.run(sync_notes(include_archived=True))
@@ -253,9 +303,18 @@ def info(note_id, fmt):
             match = note
             break
     if not match:
-        raise SystemExit(f"No note {note_id}")
+        die(f"No note {note_id}", EXIT_NOT_FOUND, hint="Run: keep list --format json --select id,title")
+    payload = match
+    if compact:
+        payload = {k: match.get(k) for k in ("id", "type", "title", "updated", "pinned", "archived")}
+        payload["title"] = display_title(match)
+    payload = select_fields(payload, select)
+    fmt = resolve_format(fmt)
+    if as_csv:
+        emit_csv([payload] if isinstance(payload, dict) else payload)
+        return
     if fmt == "json":
-        click.echo(json.dumps(match, indent=2))
+        emit_json(payload)
         return
     if fmt == "text":
         if match["title"]:
@@ -275,7 +334,8 @@ def info(note_id, fmt):
 @main.command("get")
 @click.argument("note_id")
 @click.option("-o", "out_path", type=click.Path(), default=None)
-def get_cmd(note_id, out_path):
+@click.option("--quiet", "-q", is_flag=True)
+def get_cmd(note_id, out_path, quiet):
     """Print note text (title + body)."""
     need_session()
     notes = asyncio.run(sync_notes(include_archived=True))
@@ -285,18 +345,19 @@ def get_cmd(note_id, out_path):
             match = note
             break
     if not match:
-        raise SystemExit(f"No note {note_id}")
+        die(f"No note {note_id}", EXIT_NOT_FOUND, hint="Run: keep list --id-only")
     parts = []
     if match["title"]:
         parts.append(match["title"])
         parts.append("")
     parts.append(match["text"] or "")
-    text = "\n".join(parts).rstrip() + "\n"
+    text_out = "\n".join(parts).rstrip() + "\n"
     if out_path:
-        Path(out_path).write_text(text)
-        console.print(f"Wrote {out_path}")
+        Path(out_path).write_text(text_out)
+        if not quiet:
+            click.echo(f"Wrote {out_path}", err=True)
         return
-    click.echo(text, nl=False)
+    click.echo(text_out, nl=False)
 
 
 if __name__ == "__main__":
