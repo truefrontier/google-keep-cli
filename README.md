@@ -32,12 +32,14 @@ Playwright uses your installed Chrome (`channel="chrome"`). You do not need `pla
 ```bash
 keep login
 keep list
-keep list --format json
 keep list --limit 20
 keep list --archived
+keep list --compact | jq                 # piped → JSON automatically
+keep list --select id,title --csv
 keep search "picnic"
-keep search "picnic" --format json
+keep search "picnic" --compact --quiet
 keep info <id>
+keep info <id> --format json --compact
 keep info <id> --format text
 keep get <id>
 keep get <id> -o note.txt
