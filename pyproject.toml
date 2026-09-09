@@ -1,0 +1,23 @@
+[project]
+name = "google-keep-cli"
+version = "0.1.0"
+description = "Unofficial read-only CLI for Google Keep. Sign in once, then list, search, and read notes."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "True Frontier" }]
+dependencies = [
+    "playwright>=1.40.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+keep = "keep_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["keep_cli"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
